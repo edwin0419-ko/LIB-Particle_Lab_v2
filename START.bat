@@ -44,6 +44,22 @@ if "%NEED_SETUP%"=="1" (
   )
 )
 
+REM 기본 모델 가중치 (없으면 GitHub Release 에서 자동 다운로드)
+set "WEIGHTS_URL=https://github.com/edwin0419-ko/LIB-Particle_Lab_v2/releases/download/v2.0.0"
+if not exist "basic_pt" mkdir "basic_pt"
+if not exist "basic_pt\U-net++" (
+  echo [정보] 기본 U-Net 모델 다운로드 - 약 35MB
+  curl -fL --retry 3 -o "basic_pt\U-net++.part" "%WEIGHTS_URL%/U-net++.pt"
+  if exist "basic_pt\U-net++.part" move /Y "basic_pt\U-net++.part" "basic_pt\U-net++" >nul
+  if not exist "basic_pt\U-net++" echo [경고] U-Net 모델 다운로드 실패 - 화면에서 .pt 파일을 직접 선택하세요.
+)
+if not exist "basic_pt\yolo_11" (
+  echo [정보] 기본 YOLO 모델 다운로드 - 약 53MB
+  curl -fL --retry 3 -o "basic_pt\yolo_11.part" "%WEIGHTS_URL%/yolo_11.pt"
+  if exist "basic_pt\yolo_11.part" move /Y "basic_pt\yolo_11.part" "basic_pt\yolo_11" >nul
+  if not exist "basic_pt\yolo_11" echo [경고] YOLO 모델 다운로드 실패 - 화면에서 .pt 파일을 직접 선택하세요.
+)
+
 REM venv 활성화
 call "venv\Scripts\activate.bat"
 

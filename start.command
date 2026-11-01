@@ -53,6 +53,22 @@ if [ "$NEED_SETUP" = "1" ]; then
   printf "\n"
 fi
 
+# ── 기본 모델 가중치 (없으면 GitHub Release 에서 자동 다운로드) ──
+WEIGHTS_URL="https://github.com/edwin0419-ko/LIB-Particle_Lab_v2/releases/download/v2.0.0"
+mkdir -p basic_pt
+for pair in "U-net++|U-net++.pt|U-Net, 약 35MB" "yolo_11|yolo_11.pt|YOLO, 약 53MB"; do
+  IFS='|' read -r WNAME WASSET WDESC <<< "$pair"
+  if [ ! -s "basic_pt/$WNAME" ]; then
+    printf "${Y}▸ 기본 모델 다운로드 ($WDESC)...${N}\n"
+    if curl -fL --retry 3 -o "basic_pt/$WNAME.part" "$WEIGHTS_URL/$WASSET"; then
+      mv "basic_pt/$WNAME.part" "basic_pt/$WNAME"
+    else
+      rm -f "basic_pt/$WNAME.part"
+      printf "${R}  다운로드 실패 — 화면에서 .pt 파일을 직접 선택하세요.${N}\n"
+    fi
+  fi
+done
+
 # venv 활성화
 # shellcheck disable=SC1091
 source "venv/bin/activate"
