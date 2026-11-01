@@ -246,6 +246,8 @@ type Particle = {
   area_px: number;  // pixel count
   cy: number;
   cx: number;
+  /** 형상 지표 — 길이/면적은 스케일 환산 단위 (HybridResult.length_unit) */
+  metrics?: Record<string, number | null>;
 };
 
 // 모듈 레벨 캐시 — 같은 base 이미지를 여러 번 디코드하지 않도록.
@@ -305,10 +307,24 @@ async function renderNumberedImage(
   return canvas.toDataURL("image/png");
 }
 
+// 형상 · 입도 지표 (backend particle_morphology.distribution_summary). 길이 단위 = length_unit
+type MorphologySummary = {
+  n_particles: number;
+  unit: "µm" | "px";
+  n_edge_removed?: number;
+  crop_bottom_px?: number;
+  irregular_threshold?: number;
+  [k: string]: number | string | boolean | null | undefined;
+};
+
 type HybridItem = {
   filename: string;
   shape: [number, number];
   n_instances: number;
+  n_instances_before_edge?: number;
+  n_edge_removed?: number;
+  crop_bottom_px?: number;
+  morphology?: MorphologySummary;
   n_yolo: number;
   K_unet_anchor: number;
   tau: number;
@@ -319,6 +335,17 @@ type HybridItem = {
   particles?: Particle[];
   diag_prob_png: string;
   diag_high_png: string;
+  diag_low_png?: string;
+  diag_prob_instances_png?: string;
+  diag_prob_with_separator_png?: string;
+  low_stats?: {
+    p_low_px: number;
+    converted_px: number;
+    converted_pct: number;
+    k_at_low: number;
+    k_after_separator: number;
+    k_delta: number;
+  };
   diag_close_png: string;
   diag_boundary_png: string;
   diag_separator_png: string;
@@ -347,6 +374,11 @@ type HybridResult = {
   summary_yolo?: Metrics & { n_with_gt: number };
   summary_unet_low?: Metrics & { n_with_gt: number };
   summary_hybrid?: Metrics & { n_with_gt: number };
+  morphology_all?: MorphologySummary;
+  particle_columns?: { key: string; ko: string; en: string; unit: string }[];
+  run_id?: string;
+  um_per_px?: number | null;
+  length_unit?: "µm" | "px";
   excel_data_url?: string;
   excel_size_bytes?: number;
   excel_error?: string;
@@ -524,6 +556,13 @@ export default function Page() {
   const [hybridYoloRemoveEnclosed, setHybridYoloRemoveEnclosed] = useState(true);
   const [hybridEnclosedRatio, setHybridEnclosedRatio] = useState(0.9);
   const [hybridDevice, setHybridDevice] = useState("auto");
+  // 전처리 · 스케일 (형상/입도 지표)
+  const [hybridCropMode, setHybridCropMode] = useState<"none" | "auto" | "manual">("auto");
+  const [hybridCropPx, setHybridCropPx] = useState(60);
+  const [hybridRemoveEdge, setHybridRemoveEdge] = useState(true);
+  const [hybridScalePx, setHybridScalePx] = useState("");
+  const [hybridScaleUm, setHybridScaleUm] = useState("");
+  const [hybridIrregular, setHybridIrregular] = useState(0.7);
   const [hybridRes, setHybridRes] = useState<HybridResult | null>(null);
   const [hybridActiveIdx, setHybridActiveIdx] = useState(0);
   const [hybridDiagView, setHybridDiagView] = useState<"original" | "overlay" | "instances" | "numbered" | "mask" | "prob" | "high" | "close" | "boundary" | "separator" | "color" | "hist">("overlay");
@@ -1093,6 +1132,17 @@ export default function Page() {
         fd.append("yolo_remove_enclosed", String(hybridYoloRemoveEnclosed));
         fd.append("enclosed_ratio", String(hybridEnclosedRatio));
         fd.append("device", hybridDevice);
+        fd.append("crop_bottom_mode", hybridCropMode);
+        fd.append("crop_bottom_px", String(hybridCropPx));
+        fd.append("remove_edge_particles", String(hybridRemoveEdge));
+        {
+          const sp = parseFloat(hybridScalePx), su = parseFloat(hybridScaleUm);
+          if (sp > 0 && su > 0) {
+            fd.append("scale_bar_px", String(sp));
+            fd.append("scale_bar_um", String(su));
+          }
+        }
+        fd.append("irregular_circularity", String(hybridIrregular));
       } else if (mode === "legacy") {
         if (predictImages.length === 0) throw new Error("이미지를 1장 이상 추가해주세요.");
         url = `${API_BASE}/api/run/legacy`;
@@ -1984,6 +2034,17 @@ export default function Page() {
             />
           )}
 
+          {mode === "hybrid" && (
+            <HybridMorphologyPanel
+              cropMode={hybridCropMode} setCropMode={setHybridCropMode}
+              cropPx={hybridCropPx} setCropPx={setHybridCropPx}
+              removeEdge={hybridRemoveEdge} setRemoveEdge={setHybridRemoveEdge}
+              scalePx={hybridScalePx} setScalePx={setHybridScalePx}
+              scaleUm={hybridScaleUm} setScaleUm={setHybridScaleUm}
+              irregular={hybridIrregular} setIrregular={setHybridIrregular}
+            />
+          )}
+
           {/* 다운로드 패널 — Hybrid 결과 있을 때만, 파라미터 바로 아래 */}
           {mode === "hybrid" && hybridRes && (() => {
             const it = hybridRes.results[Math.min(hybridActiveIdx, hybridRes.results.length - 1)];
@@ -2019,6 +2080,8 @@ export default function Page() {
                 currentSrc={srcByView[dv] ?? ""}
                 originalsMap={hybridOriginals}
                 labelScale={hybridLabelScale}
+                scalePx={hybridScalePx} setScalePx={setHybridScalePx}
+                scaleUm={hybridScaleUm} setScaleUm={setHybridScaleUm}
               />
             );
           })()}
@@ -4313,6 +4376,12 @@ function HybridView({
           <span>YOLO instances <b className="text-[#191919]">{it.n_yolo}</b></span>
           <span>U-Net anchor <b className="text-[#191919]">{it.K_unet_anchor}</b></span>
           <span>τ (Otsu) <b className="text-[#191919]">{it.tau.toFixed(2)}</b></span>
+          {!!it.crop_bottom_px && (
+            <span>하단 크롭 <b className="text-[#191919]">{it.crop_bottom_px}px</b></span>
+          )}
+          {!!it.n_edge_removed && (
+            <span>모서리 제거 <b className="text-[#191919]">{it.n_edge_removed}</b>개</span>
+          )}
         </div>
 
         {diagView === "numbered" && (it.particles?.length ?? 0) > 0 && (
@@ -4396,6 +4465,16 @@ function HybridView({
           </div>
         )}
       </div>
+
+      {it.morphology && (
+        <MorphologyCard
+          title={`형상 · 입도 지표 — ${it.filename}`}
+          m={it.morphology}
+        />
+      )}
+      {r.morphology_all && r.n_images > 1 && (
+        <MorphologyCard title={`형상 · 입도 지표 — 전체 ${r.n_images}장`} m={r.morphology_all} />
+      )}
 
       {/* 평가 지표 — 새 백엔드는 세 방법별, 옛 백엔드는 hybrid 단일 metrics 만 */}
       {(() => {
@@ -4543,7 +4622,7 @@ function InferenceProgressCard({
 
 function HybridDownloadBar({
   result, currentItem, currentDiagView, currentDiagLabel, currentSrc, originalsMap,
-  labelScale,
+  labelScale, scalePx, setScalePx, scaleUm, setScaleUm,
 }: {
   result: HybridResult;
   currentItem: HybridItem;
@@ -4552,8 +4631,70 @@ function HybridDownloadBar({
   currentSrc: string;
   originalsMap: Record<string, string>;
   labelScale: number;
+  scalePx: string; setScalePx: (s: string) => void;
+  scaleUm: string; setScaleUm: (s: string) => void;
 }) {
-  const [busy, setBusy] = useState<null | "zip" | "ppt" | "pdf" | "particles">(null);
+  const [busy, setBusy] = useState<null | "zip" | "ppt" | "pdf" | "particles" | "metrics">(null);
+  // 스케일 없이 실행된 결과에서 엑셀 다운로드 → 스케일 입력 창
+  const [scaleAsk, setScaleAsk] = useState<null | "metrics" | "particles">(null);
+  const askUmPerPx = (() => {
+    const sp = parseFloat(scalePx), su = parseFloat(scaleUm);
+    return sp > 0 && su > 0 ? su / sp : null;
+  })();
+  useEffect(() => {
+    if (!scaleAsk) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setScaleAsk(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [scaleAsk]);
+
+  function requestExcel(kind: "metrics" | "particles") {
+    if (result.um_per_px) {
+      if (kind === "metrics") downloadMetricsXlsx(null);
+      else downloadParticlesXlsx(null);
+    } else {
+      setScaleAsk(kind);
+    }
+  }
+
+  /** 지표 엑셀. umPerPx 가 있으면 (스케일 없이 실행된 결과를) 서버에서 µm 로 재생성. */
+  async function downloadMetricsXlsx(umPerPx: number | null) {
+    const name = `hybrid_results_${result.n_images}imgs.xlsx`;
+    if (!umPerPx || result.um_per_px) {
+      if (!result.excel_data_url) return;
+      const a = document.createElement("a");
+      a.href = result.excel_data_url;
+      a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      return;
+    }
+    if (!result.run_id) {
+      alert("이 결과는 µm 재생성을 지원하지 않습니다. 스케일을 입력하고 분석을 다시 실행해주세요.");
+      return;
+    }
+    setBusy("metrics");
+    try {
+      const fd = new FormData();
+      fd.append("run_id", result.run_id);
+      fd.append("scale_bar_px", String(parseFloat(scalePx)));
+      fd.append("scale_bar_um", String(parseFloat(scaleUm)));
+      const r = await fetch(`${API_BASE}/api/run/hybrid/excel`, { method: "POST", body: fd });
+      if (!r.ok) {
+        let msg = `HTTP ${r.status}`;
+        try { msg = (await r.json()).detail ?? msg; } catch {}
+        throw new Error(msg);
+      }
+      const url = URL.createObjectURL(await r.blob());
+      const a = document.createElement("a");
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(`엑셀 생성 실패: ${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  }
 
   // ── PDF 옵션 모달 ──
   type PdfViewKey =
@@ -4640,6 +4781,7 @@ function HybridDownloadBar({
     setBusy("zip");
     try {
       const JSZipMod = (await import("jszip")).default;
+      const XLSX = await import("xlsx");
       const zip = new JSZipMod();
       // overlay + mask + instances 한 폴더씩
       for (let i = 0; i < result.results.length; i++) {
@@ -4651,6 +4793,9 @@ function HybridDownloadBar({
           ["instances", it.instances_png],
           ["mask", it.mask_png],
           ["unet_prob", it.diag_prob_png],
+          ["unet_low", it.diag_low_png],
+          ["unet_prob_instances", it.diag_prob_instances_png],
+          ["unet_prob_with_separator", it.diag_prob_with_separator_png],
           ["separator", it.diag_separator_png],
         ];
         for (const [name, dataUrl] of pairs) {
@@ -4664,6 +4809,50 @@ function HybridDownloadBar({
           if (b64) zip.file(`${idx}_${stem}/gt.png`, b64, { base64: true });
         }
       }
+
+      // ── (a) 그래프용 xlsx: separator 가 P_low 를 얼마나 배경으로 바꿨는가 ──
+      // ── (b) 그래프용 xlsx: separator cut 전/후 component 개수 ──
+      const statsRows = result.results
+        .map((it, i) => ({ i, it, s: it.low_stats }))
+        .filter(({ s }) => s !== undefined) as {
+          i: number; it: typeof result.results[number]; s: NonNullable<typeof result.results[number]["low_stats"]>;
+        }[];
+      if (statsRows.length > 0) {
+        const sepRows = statsRows.map(({ i, it, s }) => ({
+          idx: i + 1,
+          filename: it.filename,
+          p_low_px: s.p_low_px,
+          converted_px: s.converted_px,
+          converted_pct: Number(s.converted_pct.toFixed(4)),
+        }));
+        const meanPct = sepRows.reduce((a, r) => a + r.converted_pct, 0) / sepRows.length;
+        const sepWb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(sepWb, XLSX.utils.json_to_sheet(sepRows), "per_image");
+        XLSX.utils.book_append_sheet(sepWb, XLSX.utils.json_to_sheet([
+          { metric: "mean_converted_pct", value: Number(meanPct.toFixed(4)) },
+          { metric: "n_images", value: sepRows.length },
+        ]), "summary");
+        const sepBuf = XLSX.write(sepWb, { type: "array", bookType: "xlsx" }) as ArrayBuffer;
+        zip.file("separator_impact.xlsx", sepBuf);
+
+        const compRows = statsRows.map(({ i, it, s }) => ({
+          idx: i + 1,
+          filename: it.filename,
+          k_at_low: s.k_at_low,
+          k_after_separator: s.k_after_separator,
+          delta: s.k_delta,
+        }));
+        const meanDelta = compRows.reduce((a, r) => a + r.delta, 0) / compRows.length;
+        const compWb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(compWb, XLSX.utils.json_to_sheet(compRows), "per_image");
+        XLSX.utils.book_append_sheet(compWb, XLSX.utils.json_to_sheet([
+          { metric: "mean_delta_particles_per_image", value: Number(meanDelta.toFixed(4)) },
+          { metric: "n_images", value: compRows.length },
+        ]), "summary");
+        const compBuf = XLSX.write(compWb, { type: "array", bookType: "xlsx" }) as ArrayBuffer;
+        zip.file("component_count_impact.xlsx", compBuf);
+      }
+
       const blob = await zip.generateAsync({ type: "blob" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -5177,11 +5366,22 @@ function HybridDownloadBar({
   // ── 입자별 크기 엑셀 (.xlsx) ──
   // 각 이미지마다 시트 1개 + "Summary" 시트 1개.
   // 시트 컬럼: id (1..N), label (p1, p2, ...), area_px, centroid_x, centroid_y, area_um2(추후)
-  async function downloadParticlesXlsx() {
+  /** umPerPx: px 결과를 다운로드 시점에 µm 로 환산 (결과가 이미 µm 면 무시). */
+  async function downloadParticlesXlsx(umPerPx: number | null) {
     setBusy("particles");
     try {
       const XLSX = await import("xlsx");
       const wb = XLSX.utils.book_new();
+      const conv = !result.um_per_px && umPerPx ? umPerPx : null;
+      const unit = conv ? "µm" : (result.length_unit ?? "px");
+      // 열 단위 → 환산 배율 (px → µm, px² → µm²)
+      const mcols = (result.particle_columns ?? []).map(c => {
+        if (conv && c.unit === "px") return { ...c, unit: "µm", f: conv };
+        if (conv && c.unit === "px²") return { ...c, unit: "µm²", f: conv * conv };
+        return { ...c, f: 1 };
+      });
+      const lf = conv ?? 1;
+      const withUnit = (name: string, u: string) => (u ? `${name} (${u})` : name);
 
       // 시트명 안전 처리 — Excel 제한 (31자, /\?*[] 금지)
       const safeSheetName = (s: string, used: Set<string>) => {
@@ -5193,57 +5393,52 @@ function HybridDownloadBar({
         return name;
       };
       const used = new Set<string>();
+      const num = (v: unknown, f = 1) => (typeof v === "number" && Number.isFinite(v) ? v * f : "");
 
-      // Summary 시트 — 이미지별 총 입자 수 + 평균/중위 크기
+      // Summary 시트 — 이미지별 입자 수 + 입도/형상 요약. 1행 한글 / 2행 English
+      const sumCols: [string, string, string, (it: HybridItem) => number | string][] = [
+        ["파일명", "Filename", "", it => it.filename],
+        ["입자 수", "Particle count", "", it => (it.particles ?? []).length],
+        ["모서리 제거 입자 수", "Edge particles removed", "", it => it.n_edge_removed ?? 0],
+        ["하단 크롭", "Bottom crop", "px", it => it.crop_bottom_px ?? 0],
+        ["ECD 평균", "ECD mean", unit, it => num(it.morphology?.ecd_mean, lf)],
+        ["D10", "D10", unit, it => num(it.morphology?.d10, lf)],
+        ["D50", "D50", unit, it => num(it.morphology?.d50, lf)],
+        ["D90", "D90", unit, it => num(it.morphology?.d90, lf)],
+        ["PSD Span", "PSD Span", "", it => num(it.morphology?.span)],
+        ["원형도 평균", "Circularity mean", "", it => num(it.morphology?.circularity_mean)],
+        ["종횡비 평균", "Aspect Ratio mean", "", it => num(it.morphology?.aspect_ratio_mean)],
+        ["불규칙 입자 비율", "Irregular fraction", "%", it => num(it.morphology?.irregular_fraction_pct)],
+        ["이미지 폭", "Image width", "px", it => it.shape[1]],
+        ["이미지 높이", "Image height", "px", it => it.shape[0]],
+      ];
       const summaryRows: (string | number)[][] = [
-        ["filename", "n_particles", "total_area_px", "mean_area_px", "median_area_px", "min_area_px", "max_area_px", "image_w", "image_h"],
+        sumCols.map(([ko, , u]) => withUnit(ko, u)),
+        sumCols.map(([, en, u]) => withUnit(en, u)),
       ];
 
       for (const it of result.results) {
         const parts = it.particles ?? [];
         const sheetName = safeSheetName(it.filename || "image", used);
-        // 정렬: 면적 큰 순 → 그대로 (backend 가 이미 정렬해서 보냄)
+        // 정렬: 면적 큰 순 → 그대로 (backend 가 이미 정렬해서 보냄). 번호 = 번호 이미지와 동일
         const rows: (string | number)[][] = [
-          ["id", "label", "area_px", "centroid_x", "centroid_y"],
-          ...parts.map(p => [p.id, p.label, p.area_px, p.cx, p.cy]),
+          ["입자 번호", "중심 x (px)", "중심 y (px)", ...mcols.map(c => withUnit(c.ko, c.unit))],
+          ["Particle ID", "Centroid x (px)", "Centroid y (px)", ...mcols.map(c => withUnit(c.en, c.unit))],
+          ...parts.map(p => [
+            p.id, p.cx, p.cy,
+            ...mcols.map(c => num(p.metrics?.[c.key], c.f)),
+          ]),
         ];
         const ws = XLSX.utils.aoa_to_sheet(rows);
-        // 컬럼 너비
-        (ws as any)["!cols"] = [
-          { wch: 6 }, { wch: 8 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
-        ];
+        (ws as any)["!cols"] = [{ wch: 10 }, { wch: 11 }, { wch: 11 }, ...mcols.map(() => ({ wch: 16 }))];
         XLSX.utils.book_append_sheet(wb, ws, sheetName);
-
-        // 요약 통계
-        const areas = parts.map(p => p.area_px);
-        const total = areas.reduce((a, b) => a + b, 0);
-        const mean = areas.length ? total / areas.length : 0;
-        const sorted = [...areas].sort((a, b) => a - b);
-        const median = sorted.length
-          ? (sorted.length % 2
-            ? sorted[(sorted.length - 1) / 2]
-            : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2)
-          : 0;
-        summaryRows.push([
-          it.filename,
-          parts.length,
-          total,
-          Number(mean.toFixed(2)),
-          Number(median.toFixed(2)),
-          areas.length ? sorted[0] : 0,
-          areas.length ? sorted[sorted.length - 1] : 0,
-          it.shape[1], it.shape[0],
-        ]);
+        summaryRows.push(sumCols.map(([, , , f]) => f(it)));
       }
 
       const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
-      (wsSummary as any)["!cols"] = [
-        { wch: 32 }, { wch: 12 }, { wch: 14 }, { wch: 13 }, { wch: 14 },
-        { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 10 },
-      ];
+      (wsSummary as any)["!cols"] = sumCols.map((_, i) => ({ wch: i === 0 ? 32 : 14 }));
       // Summary 를 첫 시트로
       XLSX.utils.book_append_sheet(wb, wsSummary, "Summary");
-      // wb.SheetNames 의 끝에 추가되었으니 첫번째로 이동
       const idx = wb.SheetNames.indexOf("Summary");
       if (idx > 0) {
         wb.SheetNames.splice(idx, 1);
@@ -5375,9 +5570,9 @@ function HybridDownloadBar({
                 <circle cx="6" cy="17" r="1.7"/>
               </svg>
             }
-            label={busy === "particles" ? "엑셀 생성 중..." : "입자별 픽셀 엑셀"}
-            sub={`p1, p2... · 이미지당 시트 1개 + Summary`}
-            onClick={downloadParticlesXlsx}
+            label={busy === "particles" ? "엑셀 생성 중..." : "입자별 지표 엑셀"}
+            sub={`입자마다 ECD·원형도… (${result.length_unit ?? "px"}) · 이미지당 시트 + Summary`}
+            onClick={() => requestExcel("particles")}
             disabled={busy !== null}
           />
         )}
@@ -5392,13 +5587,96 @@ function HybridDownloadBar({
                 <polyline points="10 9 9 9 8 9"/>
               </svg>
             }
-            label="지표 엑셀 (.xlsx)"
-            sub={`평가지표 시트 4개${result.excel_size_bytes ? ` · ${(result.excel_size_bytes / 1024).toFixed(0)}KB` : ""}`}
-            href={result.excel_data_url}
-            downloadName={`hybrid_results_${result.n_images}imgs.xlsx`}
+            label={busy === "metrics" ? "엑셀 생성 중..." : "지표 엑셀 (.xlsx)"}
+            sub={`평가지표 + 형상·입도 지표 (한/영)${result.excel_size_bytes ? ` · ${(result.excel_size_bytes / 1024).toFixed(0)}KB` : ""}`}
+            onClick={() => requestExcel("metrics")}
+            disabled={busy !== null}
           />
         )}
+        {!result.um_per_px && (
+          <div className="text-[10.5px] text-[#b7791f] bg-[#fffaeb] border border-[#fde68a] rounded-md px-2.5 py-1.5 leading-snug">
+            스케일 미입력 상태로 분석됨 — 엑셀 다운로드 시 스케일을 입력하면 µm 로 환산됩니다.
+          </div>
+        )}
       </div>
+
+      {scaleAsk && typeof document !== "undefined" && createPortal(
+        <div
+          className="fixed inset-0 z-50 bg-black/40 backdrop-blur-[2px] flex items-center justify-center p-4 fade-in"
+          onClick={() => setScaleAsk(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-lg w-full max-w-[420px] p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-[14px] font-semibold text-[#191919]">스케일을 입력해주세요</h3>
+            <p className="text-[11.5px] text-[#6b7280] mt-1 leading-snug">
+              이 결과는 스케일 없이 분석되어 길이 지표가 <b>px</b> 단위입니다.
+              스케일바 길이(px)와 실제 길이(µm)를 입력하면 재분석 없이 µm 로 환산해 엑셀을 만듭니다.
+            </p>
+            <div className="grid grid-cols-2 gap-2 mt-3">
+              <label className="block text-xs">
+                <div className="mb-1 text-[#5a606e]">스케일바 길이 (px)</div>
+                <input
+                  autoFocus type="text" inputMode="decimal" placeholder="예: 200"
+                  value={scalePx} onChange={(e) => setScalePx(e.target.value)}
+                  className="w-full border border-[#e6e6df] rounded-md px-2 py-1.5 text-xs bg-white font-mono"
+                />
+              </label>
+              <label className="block text-xs">
+                <div className="mb-1 text-[#5a606e]">실제 길이 (µm)</div>
+                <input
+                  type="text" inputMode="decimal" placeholder="예: 10"
+                  value={scaleUm} onChange={(e) => setScaleUm(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && askUmPerPx) {
+                      const k = scaleAsk; setScaleAsk(null);
+                      if (k === "metrics") downloadMetricsXlsx(askUmPerPx); else downloadParticlesXlsx(askUmPerPx);
+                    }
+                  }}
+                  className="w-full border border-[#e6e6df] rounded-md px-2 py-1.5 text-xs bg-white font-mono"
+                />
+              </label>
+            </div>
+            <div className="text-[10.5px] mt-1.5 h-4 text-[#6b7280]">
+              {askUmPerPx
+                ? <>1 px = <b className="font-mono text-[#191919]">{askUmPerPx.toPrecision(4)}</b> µm</>
+                : <span className="text-[#a4262c]">두 값을 모두 0보다 크게 입력해주세요.</span>}
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                type="button"
+                disabled={!askUmPerPx}
+                onClick={() => {
+                  const k = scaleAsk; setScaleAsk(null);
+                  if (k === "metrics") downloadMetricsXlsx(askUmPerPx); else downloadParticlesXlsx(askUmPerPx);
+                }}
+                className="flex-1 py-2 rounded-md text-[12px] font-semibold bg-[#191919] text-white disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                µm 로 다운로드
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const k = scaleAsk; setScaleAsk(null);
+                  if (k === "metrics") downloadMetricsXlsx(null); else downloadParticlesXlsx(null);
+                }}
+                className="px-3 py-2 rounded-md text-[12px] border border-[#e6e6e2] text-[#6b7280] hover:border-[#191919] hover:text-[#191919]"
+              >
+                px 그대로
+              </button>
+              <button
+                type="button"
+                onClick={() => setScaleAsk(null)}
+                className="px-3 py-2 rounded-md text-[12px] text-[#9ca3af] hover:text-[#191919]"
+              >
+                취소
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
 
       {pdfModalOpen && typeof document !== "undefined" && createPortal(
         <div
@@ -5936,6 +6214,188 @@ function HybridParamsPanel(props: {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function HybridMorphologyPanel(props: {
+  cropMode: "none" | "auto" | "manual"; setCropMode: (m: "none" | "auto" | "manual") => void;
+  cropPx: number; setCropPx: (n: number) => void;
+  removeEdge: boolean; setRemoveEdge: (b: boolean) => void;
+  scalePx: string; setScalePx: (s: string) => void;
+  scaleUm: string; setScaleUm: (s: string) => void;
+  irregular: number; setIrregular: (n: number) => void;
+}) {
+  const sp = parseFloat(props.scalePx), su = parseFloat(props.scaleUm);
+  const umPerPx = sp > 0 && su > 0 ? su / sp : null;
+  const inputCls = "w-full border border-[#e6e6df] rounded-md px-2 py-1.5 text-xs bg-white font-mono";
+  return (
+    <div className="app-card p-4">
+      <h2 className="text-[13px] font-semibold text-[#191919]">전처리 · 스케일</h2>
+      <p className="text-[10.5px] text-[#9ca3af] leading-snug mt-0.5">
+        형상 · 입도 지표 (ECD, D50, 원형도 …) 계산용
+      </p>
+      <div className="mt-3 space-y-3">
+        <div className="space-y-3">
+          <SectionHead>하단 스케일바 영역</SectionHead>
+          <div className="grid grid-cols-3 gap-1">
+            {([
+              ["none", "안 자름"],
+              ["auto", "자동 감지"],
+              ["manual", "직접 입력"],
+            ] as const).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => props.setCropMode(id)}
+                className={
+                  "text-[11px] px-2 py-1.5 rounded-md border " +
+                  (props.cropMode === id
+                    ? "bg-[#191919] text-white border-[#191919]"
+                    : "bg-white border-[#e6e6e2] text-[#6b7280] hover:border-[#191919] hover:text-[#191919]")
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {props.cropMode === "manual" && (
+            <NumberKnob
+              label="하단에서 자를 높이 (px)"
+              value={props.cropPx} onChange={props.setCropPx}
+              min={0} max={600}
+            />
+          )}
+          <div className="text-[10px] text-gray-500 leading-snug">
+            {props.cropMode === "auto"
+              ? "하단의 단색 정보바(배율·스케일바 표시줄)를 찾아 자름. 결과의 '하단 크롭' 값을 확인하세요."
+              : props.cropMode === "manual"
+                ? "모든 이미지에서 같은 높이만큼 아래를 자름."
+                : "이미지 전체를 분석."}
+          </div>
+          <Toggle
+            label="모서리에 닿은 입자 제거"
+            desc="테두리에 잘린 입자는 크기가 작게 측정되므로 지표에서 제외 (GT 평가지표는 제거 전 기준)"
+            value={props.removeEdge}
+            onChange={props.setRemoveEdge}
+          />
+        </div>
+        <div className="space-y-3">
+          <SectionHead>스케일 · 단위 환산</SectionHead>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block text-xs">
+              <div className="mb-1 text-[#5a606e]">스케일바 길이 (px)</div>
+              <input
+                type="text" inputMode="decimal" placeholder="예: 200"
+                value={props.scalePx}
+                onChange={(e) => props.setScalePx(e.target.value)}
+                className={inputCls}
+              />
+            </label>
+            <label className="block text-xs">
+              <div className="mb-1 text-[#5a606e]">실제 길이 (µm)</div>
+              <input
+                type="text" inputMode="decimal" placeholder="예: 10"
+                value={props.scaleUm}
+                onChange={(e) => props.setScaleUm(e.target.value)}
+                className={inputCls}
+              />
+            </label>
+          </div>
+          <div className="text-[10px] text-gray-500 leading-snug">
+            {umPerPx
+              ? <>1 px = <b className="text-[#191919] font-mono">{umPerPx.toPrecision(4)}</b> µm · 이번 실행의 모든 이미지에 적용</>
+              : "비워두면 길이 지표가 px 단위로 계산됩니다."}
+          </div>
+          <FloatKnob
+            label="불규칙 입자 기준 (원형도 <)"
+            desc="이 값보다 원형도가 낮으면 불규칙 입자로 집계"
+            value={props.irregular} onChange={props.setIrregular}
+            min={0.3} max={0.95} step={0.01}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MorphologyCard({ title, m }: { title: string; m: MorphologySummary }) {
+  const u = m.unit;
+  const num = (k: string, digits = 3) => {
+    const v = m[k];
+    return typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—";
+  };
+  const groups: [string, [string, string, string][]][] = [
+    ["입도 분포 · Size distribution", [
+      ["ECD 평균 · mean", num("ecd_mean"), u],
+      ["D10", num("d10"), u],
+      ["D50", num("d50"), u],
+      ["D90", num("d90"), u],
+      ["Span (D90−D10)/D50", num("span"), ""],
+      ["Dv50 (부피 기준)", num("dv50"), u],
+      ["최대 Feret · Max", num("feret_max_mean"), u],
+      ["최소 Feret · Min", num("feret_min_mean"), u],
+    ]],
+    ["형상 (평균) · Shape (mean)", [
+      ["원형도 · Circularity", num("circularity_mean"), ""],
+      ["종횡비 · Aspect Ratio", num("aspect_ratio_mean"), ""],
+      ["Solidity", num("solidity_mean"), ""],
+      ["Convexity", num("convexity_mean"), ""],
+      ["진원도 · Roundness", num("roundness_mean"), ""],
+      ["이심률 · Eccentricity", num("eccentricity_mean"), ""],
+      ["텍스처 엔트로피", num("texture_entropy_mean"), "bits"],
+      ["프랙탈 차원", num("fractal_dim_mean"), ""],
+    ]],
+    ["분포 특성 · Distribution traits", [
+      [`불규칙 비율 (원형도<${m.irregular_threshold ?? ""})`, num("irregular_fraction_pct", 1), "%"],
+      ["크기–원형도 Spearman ρ", num("spearman_rho"), ""],
+      ["Spearman p", num("spearman_p", 4), ""],
+      ["이봉 계수 BC", num("bimodality_coefficient"), ""],
+      ["Ashman D", num("ashman_d"), ""],
+      ["ΔBIC (1−2성분)", num("delta_bic", 1), ""],
+      ["이봉 판정", m.bimodal === undefined || m.bimodal === null ? "—" : m.bimodal ? "예 (Yes)" : "아니오 (No)", ""],
+    ]],
+  ];
+  return (
+    <div className="app-card p-4">
+      <div className="flex items-baseline justify-between gap-2 mb-2">
+        <div className="text-xs font-semibold text-gray-700 truncate">{title}</div>
+        <div className="text-[10.5px] text-[#9ca3af] flex-shrink-0">
+          입자 {m.n_particles}개 · 단위 {u}
+          {!!m.n_edge_removed && ` · 모서리 제거 ${m.n_edge_removed}`}
+        </div>
+      </div>
+      {u === "px" && (
+        <div className="text-[10.5px] text-[#b7791f] bg-[#fffaeb] border border-[#fde68a] rounded-md px-2.5 py-1.5 mb-2 leading-snug">
+          스케일 미입력 — 길이 지표가 px 단위입니다. 왼쪽 &apos;전처리 · 스케일&apos;에 입력 후 다시 실행하거나, 엑셀 다운로드 때 입력하세요.
+        </div>
+      )}
+      {m.n_particles === 0 ? (
+        <div className="text-[11px] text-[#9ca3af]">분석할 입자가 없습니다.</div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {groups.map(([gTitle, rows]) => (
+            <div key={gTitle}>
+              <div className="text-[10px] uppercase tracking-wider font-semibold text-[#8d92a0] mb-1">{gTitle}</div>
+              <table className="w-full text-[11px]">
+                <tbody>
+                  {rows.map(([label, val, unit]) => (
+                    <tr key={label} className="border-b border-[#f4f4f1] last:border-0">
+                      <td className="py-0.5 text-[#6b7280] pr-2">{label}</td>
+                      <td className="py-0.5 text-right font-mono text-[#191919] whitespace-nowrap">
+                        {val}{val !== "—" && unit ? <span className="text-[#9ca3af] ml-0.5">{unit}</span> : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="text-[10px] text-[#9ca3af] mt-2">
+        입자별 값 · 크기구간별 형상 · 지표 정의(한/영)는 다운로드 → 지표 엑셀
+      </div>
     </div>
   );
 }
