@@ -1,5 +1,20 @@
 # Particle Lab v2 — Inference
 
+> ## 🧑‍🔬 처음 쓰는 분 (코딩 몰라도 됨) — Claude Code로 실행하기
+>
+> 1. **Claude Code 설치**: https://claude.com/claude-code 안내대로 설치하고 로그인합니다.
+> 2. **터미널을 열고** 프로그램을 받을 폴더(예: 바탕화면)에서 `claude` 를 실행합니다.
+> 3. 아래 문장을 그대로 붙여넣습니다.
+>
+>    ```
+>    https://github.com/edwin0419-ko/LIB-Particle_Lab_v2 이 프로그램을 내려받아서 실행해줘
+>    ```
+>
+> 4. Claude가 필요한 프로그램 설치 여부를 물어보면 허락해 주세요. 처음에는 설치 때문에 5~10분 걸립니다.
+> 5. 브라우저에 Particle Lab 화면이 뜨면 끝입니다. 사용법은 [CLAUDE.md](CLAUDE.md)의 "사용법"을 보세요.
+>
+> 다음부터는 같은 폴더에서 `claude` 를 열고 "Particle Lab 실행해줘" 라고 하면 됩니다.
+
 A practical **inference-only** edition for SEM particle segmentation. Segments particles using the U-Net × YOLO Hybrid algorithm and produces evaluation metrics.
 
 No training/augmentation/statistics modes. A version your lab colleagues can use right away by *just receiving the trained weights*.
