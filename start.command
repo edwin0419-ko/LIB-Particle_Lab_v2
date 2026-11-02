@@ -171,5 +171,8 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 # 두 프로세스 대기 (둘 중 하나가 죽으면 같이 종료)
-wait -n "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+# macOS 기본 bash 3.2 는 `wait -n` 을 지원하지 않아 즉시 실패 → 서버가 바로 꺼짐. 폴링으로 대기.
+while kill -0 "$BACKEND_PID" 2>/dev/null && kill -0 "$FRONTEND_PID" 2>/dev/null; do
+  sleep 2
+done
 cleanup
