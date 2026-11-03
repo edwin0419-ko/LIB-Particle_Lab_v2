@@ -289,11 +289,14 @@ def add_morphology_sheets(wb, morph: dict) -> None:
 
     morph = {
       "unit": "µm"|"px", "um_per_px": float|None, "settings": {...},
-      "all": {"summary": {...}, "size_bins": [...]},
-      "per_image": [{"filename", "summary", "particles"(px 단위), "size_bins"}],
+      "all": {"summary": {...}, "size_bins": [...], "shape_stats": [...]},
+      "per_image": [{"filename", "summary", "particles"(px 단위), "size_bins", "shape_stats"}],
     }
     """
-    from particle_morphology import (PARTICLE_COLUMNS, SIZE_BIN_COLUMNS,
+    from openpyxl.styles import Alignment, Font
+
+    from particle_morphology import (EXCLUDED_NOTES, PARTICLE_COLUMNS,
+                                     SHAPE_STAT_COLUMNS, SIZE_BIN_COLUMNS,
                                      SUMMARY_ROWS, scaled, unit_label)
 
     unit = morph.get("unit", "px")
@@ -301,6 +304,7 @@ def add_morphology_sheets(wb, morph: dict) -> None:
     per_image = morph.get("per_image", [])
     all_s = morph.get("all", {})
     fill = "2E7D4F"
+    by_key = {c.key: c for c in PARTICLE_COLUMNS}
 
     def u(kind):
         lab = unit_label(kind, unit)
@@ -311,27 +315,27 @@ def add_morphology_sheets(wb, morph: dict) -> None:
     files = [p["filename"] for p in per_image]
     _bilingual_header(
         ws,
-        ["지표", "단위", "전체", *files],
-        ["Metric", "Unit", "ALL", *files],
+        ["지표", "단위", "식", "전체", *files],
+        ["Metric", "Unit", "Formula", "ALL", *files],
         fill,
     )
-    for key, ko, en, kind, _, _ in SUMMARY_ROWS:
-        vals = [all_s.get("summary", {}).get(key)] + [p["summary"].get(key) for p in per_image]
-        ws.append([f"{ko} / {en}", unit_label(kind, unit), *[_cell(v) for v in vals]])
-    _format_numbers(ws, min_col=3, max_col=3 + len(files), fmt="0.0000")
+    for m in SUMMARY_ROWS:
+        vals = [all_s.get("summary", {}).get(m.key)] + [p["summary"].get(m.key) for p in per_image]
+        ws.append([f"{m.ko} / {m.en}", unit_label(m.kind, unit), m.formula, *[_cell(v) for v in vals]])
+    _format_numbers(ws, min_col=4, max_col=4 + len(files), fmt="0.0000")
     _autosize(ws, max_width=48)
 
     # ─── 이미지별: 행 = 이미지 (+ 전체) ───
     ws = wb.create_sheet("이미지별_PerImage")
     _bilingual_header(
         ws,
-        ["파일명", *[ko + u(kind) for _, ko, _, kind, _, _ in SUMMARY_ROWS]],
-        ["Filename", *[en + u(kind) for _, _, en, kind, _, _ in SUMMARY_ROWS]],
+        ["파일명", *[m.ko + u(m.kind) for m in SUMMARY_ROWS]],
+        ["Filename", *[m.en + u(m.kind) for m in SUMMARY_ROWS]],
         fill,
     )
     for name, s in [("전체 / ALL", all_s.get("summary", {}))] + \
                    [(p["filename"], p["summary"]) for p in per_image]:
-        ws.append([name, *[_cell(s.get(k)) for k, *_ in SUMMARY_ROWS]])
+        ws.append([name, *[_cell(s.get(m.key)) for m in SUMMARY_ROWS]])
     _format_numbers(ws, min_col=2, max_col=1 + len(SUMMARY_ROWS), fmt="0.0000")
     _autosize(ws, max_width=22)
 
@@ -339,27 +343,42 @@ def add_morphology_sheets(wb, morph: dict) -> None:
     #   길이/면적 = 스케일 환산 단위(µm, µm²). 스케일 없으면 px.
     #   스케일이 있으면 원본 px 값은 맨 뒤에 참고용으로.
     ws = wb.create_sheet("입자별_Particles")
-    len_cols = [c for c in PARTICLE_COLUMNS if c[3] in ("len", "area")]
-    ko_h = ["파일명"] + [ko + u(k) for _, ko, _, k, _, _ in PARTICLE_COLUMNS]
-    en_h = ["Filename"] + [en + u(k) for _, _, en, k, _, _ in PARTICLE_COLUMNS]
+    len_cols = [c for c in PARTICLE_COLUMNS if c.kind in ("len", "area")]
+    ko_h = ["파일명"] + [c.ko + u(c.kind) for c in PARTICLE_COLUMNS]
+    en_h = ["Filename"] + [c.en + u(c.kind) for c in PARTICLE_COLUMNS]
     if upp:
-        px_unit = {"len": " (px, 참고)", "area": " (px², 참고)"}
-        px_unit_en = {"len": " (px, ref.)", "area": " (px², ref.)"}
-        ko_h += [ko + px_unit[k] for _, ko, _, k, _, _ in len_cols]
-        en_h += [en + px_unit_en[k] for _, _, en, k, _, _ in len_cols]
+        ko_h += [c.ko + (" (px², 참고)" if c.kind == "area" else " (px, 참고)") for c in len_cols]
+        en_h += [c.en + (" (px², ref.)" if c.kind == "area" else " (px, ref.)") for c in len_cols]
     _bilingual_header(ws, ko_h, en_h, fill)
     for p in per_image:
         for q in p["particles"]:
             qs = scaled(q, upp)
-            row = [p["filename"], *[_cell(qs.get(c[0])) for c in PARTICLE_COLUMNS]]
+            row = [p["filename"], *[_cell(qs.get(c.key)) for c in PARTICLE_COLUMNS]]
             if upp:
-                row += [_cell(q.get(c[0])) for c in len_cols]
+                row += [_cell(q.get(c.key)) for c in len_cols]
             ws.append(row)
     _format_numbers(ws, min_col=3, max_col=len(ko_h), fmt="0.0000")
     for row in ws.iter_rows(min_row=3, min_col=2, max_col=2):  # 입자 번호 = 정수
         for cell in row:
             cell.number_format = "0"
     _autosize(ws, max_width=20)
+
+    # ─── 형상 지표 분포 통계 (지표별 11개 통계량) ───
+    ws = wb.create_sheet("형상분포_ShapeStats")
+    _bilingual_header(
+        ws,
+        ["파일명", "지표", *[ko for _, ko, _, _ in SHAPE_STAT_COLUMNS]],
+        ["Filename", "Metric", *[en for _, _, en, _ in SHAPE_STAT_COLUMNS]],
+        fill,
+    )
+    for name, rows in [("전체 / ALL", all_s.get("shape_stats", []))] + \
+                      [(p["filename"], p.get("shape_stats", [])) for p in per_image]:
+        for r in rows:
+            c = by_key.get(r["metric"])
+            label = f"{c.ko} / {c.en}" if c else r["metric"]
+            ws.append([name, label, *[_cell(r.get(k)) for k, _, _, _ in SHAPE_STAT_COLUMNS]])
+    _format_numbers(ws, min_col=4, max_col=2 + len(SHAPE_STAT_COLUMNS), fmt="0.0000")
+    _autosize(ws, max_width=40)
 
     # ─── 크기구간별 형상 (ECD 사분위) ───
     ws = wb.create_sheet("크기구간_SizeBins")
@@ -376,27 +395,54 @@ def add_morphology_sheets(wb, morph: dict) -> None:
     _format_numbers(ws, min_col=3, max_col=1 + len(SIZE_BIN_COLUMNS), fmt="0.0000")
     _autosize(ws, max_width=22)
 
-    # ─── 지표 정의 + 분석 설정 ───
+    # ─── 지표 정의: 식 · 설명 (한/영) + 제외 지표 + 분석 설정 ───
     ws = wb.create_sheet("지표정의_Definitions")
-    _bilingual_header(ws, ["지표", "단위", "정의 (한글)", "정의 (영어)"],
-                      ["Metric", "Unit", "Definition (Korean)", "Definition (English)"], fill)
+    _bilingual_header(
+        ws,
+        ["지표 (한글)", "지표 (영문)", "단위", "식", "설명 · 계산 방법 (한글)", "설명 · 계산 방법 (영문)"],
+        ["Metric (KO)", "Metric (EN)", "Unit", "Formula", "Description (KO)", "Description (EN)"],
+        fill,
+    )
     ws.freeze_panes = "A3"
-    ws.append(["[입자별 지표 / Per-particle]"])
-    for _, ko, en, kind, d_ko, d_en in PARTICLE_COLUMNS:
-        ws.append([f"{ko} / {en}", unit_label(kind, unit), d_ko, d_en])
-    ws.append([])
-    ws.append(["[분포 지표 / Distribution]"])
-    for _, ko, en, kind, d_ko, d_en in SUMMARY_ROWS:
-        if d_ko or d_en:
-            ws.append([f"{ko} / {en}", unit_label(kind, unit), d_ko, d_en])
-    ws.append([])
-    ws.append(["[분석 설정 / Analysis settings]"])
+    bold = Font(bold=True)
+
+    def section(title):
+        ws.append([])
+        ws.append([title])
+        ws.cell(row=ws.max_row, column=1).font = bold
+
+    section("[기호 / Symbols]")
+    for sym, ko, en in [
+        ("A", "면적", "area"), ("P", "둘레 (Crofton)", "perimeter (Crofton)"),
+        ("a, b", "등가 타원 장축·단축", "equivalent-ellipse major/minor axis"),
+        ("F_max, F_min, F(θ)", "Feret 최대·최소·방향 θ 의 캘리퍼 폭", "max/min Feret, caliper width at θ"),
+        ("A_hull, P_hull", "볼록껍질 면적·둘레", "convex-hull area/perimeter"),
+        ("r(s)", "면적 중심 → 외곽선 거리 (둘레 길이 등간격 128점)", "centroid-to-boundary distance, 128 arc-length samples"),
+        ("t(p)", "픽셀 p 의 국소 두께", "local thickness at pixel p"),
+        ("s", f"µm/px = {upp:.6g}" if upp else "스케일 미입력 (px 단위)", "scale"),
+        ("P10, P50 …", "분위수 (선형 보간)", "percentiles (linear interpolation)"),
+    ]:
+        ws.append([sym, "", "", "", ko, en])
+    section("[입자별 지표 / Per-particle]")
+    for c in PARTICLE_COLUMNS:
+        ws.append([c.ko, c.en, unit_label(c.kind, unit), c.formula, c.desc_ko, c.desc_en])
+    section("[분포 지표 / Distribution]")
+    for m in SUMMARY_ROWS:
+        ws.append([m.ko, m.en, unit_label(m.kind, unit), m.formula, m.desc_ko, m.desc_en])
+    section("[형상 분포 통계량 / Shape-distribution statistics] — 형상분포 시트")
+    for _, ko, en, f in SHAPE_STAT_COLUMNS:
+        ws.append([ko, en, "", f, "", ""])
+    section("[제외한 지표와 이유 / Excluded metrics]")
+    for ko, en, why_ko, why_en in EXCLUDED_NOTES:
+        ws.append([ko, en, "", "", why_ko, why_en])
+    section("[분석 설정 / Analysis settings]")
     for k, (ko, en, v) in morph.get("settings", {}).items():
-        ws.append([f"{ko} / {en}", "", _cell(v)])
-    ws.column_dimensions["A"].width = 46
-    ws.column_dimensions["B"].width = 8
-    ws.column_dimensions["C"].width = 60
-    ws.column_dimensions["D"].width = 60
+        ws.append([ko, en, "", _cell(v), "", ""])
+    for col, wdt in zip("ABCDEF", (30, 34, 8, 40, 60, 60)):
+        ws.column_dimensions[col].width = wdt
+    for row in ws.iter_rows(min_row=3):
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
 
     # 첫 화면 = 형상요약 (다른 시트 tabSelected 해제 안 하면 Excel 이 그룹 선택으로 엶)
     for w in wb.worksheets:
