@@ -6331,6 +6331,9 @@ function MorphologyCard({ title, m }: { title: string; m: MorphologySummary }) {
       ["D10", num("d10"), u],
       ["D50", num("d50"), u],
       ["D90", num("d90"), u],
+      ...(typeof m.d50_ml === "number"
+        ? [["D50 (모서리 보정)", num("d50_ml"), u] as [string, string, string]]
+        : []),
       ["Span (D90−D10)/D50", num("span"), ""],
       ["Dv50 (부피 기준)", num("dv50"), u],
       ["최대 Feret · Max", num("feret_max_mean"), u],

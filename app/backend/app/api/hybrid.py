@@ -45,6 +45,7 @@ from particle_morphology import (  # noqa: E402
     relabel_by_area,
     remove_edge_touching,
     scaled,
+    shape_distribution,
     size_bins,
     unit_label,
 )
@@ -482,21 +483,24 @@ def _morph_bundle(raw: list[dict], um_per_px: Optional[float], irr_thr: float,
     """입자 지표(px) 원본 → 스케일 적용된 이미지별/전체 분포 지표 + 엑셀 입력 dict."""
     unit = "µm" if um_per_px else "px"
     per_image = []
+    edge = bool(raw and raw[0].get("edge_removal"))
     for m in raw:
-        s = distribution_summary(m["particles"], um_per_px, irr_thr)
+        s = distribution_summary(m["particles"], um_per_px, irr_thr, edge_corrected=edge)
         s["n_edge_removed"] = m["n_edge_removed"]
         s["crop_bottom_px"] = m["crop_px"]
         per_image.append({
             "filename": m["filename"], "summary": s, "particles": m["particles"],
             "size_bins": size_bins(m["particles"], um_per_px),
+            "shape_stats": shape_distribution(m["particles"]),
         })
     all_p = [q for m in raw for q in m["particles"]]
-    all_s = distribution_summary(all_p, um_per_px, irr_thr)
+    all_s = distribution_summary(all_p, um_per_px, irr_thr, edge_corrected=edge)
     all_s["n_edge_removed"] = int(sum(m["n_edge_removed"] for m in raw))
     return {
         "unit": unit,
         "um_per_px": um_per_px,
-        "all": {"summary": all_s, "size_bins": size_bins(all_p, um_per_px)},
+        "all": {"summary": all_s, "size_bins": size_bins(all_p, um_per_px),
+                "shape_stats": shape_distribution(all_p)},
         "per_image": per_image,
         "settings": {
             **settings,
@@ -858,6 +862,7 @@ async def run_hybrid(
                 "particles": pm_list,
                 "n_edge_removed": int(n_edge_removed),
                 "crop_px": int(crop_px),
+                "edge_removal": bool(remove_edge_particles),
             })
 
             # GT 매칭 — YOLO only / U-Net 75% / Hybrid 세 방법 모두 평가
@@ -957,9 +962,9 @@ async def run_hybrid(
         out["length_unit"] = morph_excel["unit"]
         # 입자별 지표 열 정의 (한/영 + 단위) — 프런트 입자별 엑셀용
         out["particle_columns"] = [
-            {"key": k, "ko": ko, "en": en, "unit": unit_label(kind, out["length_unit"])}
-            for k, ko, en, kind, _, _ in PARTICLE_COLUMNS
-            if k not in ("id", "cx", "cy")
+            {"key": c.key, "ko": c.ko, "en": c.en, "unit": unit_label(c.kind, out["length_unit"])}
+            for c in PARTICLE_COLUMNS
+            if c.key not in ("id", "cx", "cy")
         ]
 
         # 전체 결과 xlsx 생성 (시트별: Parameters / Metrics_per_image / Summary / Image_diagnostics)
